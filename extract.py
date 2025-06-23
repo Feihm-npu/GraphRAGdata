@@ -1,146 +1,153 @@
+# extract.py
 from datasets import load_dataset
-import argparse
-from vllm import LLM, SamplingParams
-import pandas as pd
-import numpy as np
+import argparse, json
 from pathlib import Path
-from tqdm import tqdm
+from tqdm.auto import tqdm
+import json
+from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
+from prompts import PROMPTS
+import re
+# --- prompt 常量 ---
+SYS_PROMPT = (
+    "You are a helpful assistant for extracting entities and relationships "
+    "for a GraphRAG task."
+)
+TUPLE_DELIM = "|"
+RECORD_DELIM = "<REC>"
+COMPLETION_TOKEN = "<ENTITY EXTRACTED>"
 
-# Prompt templates
-sys_prompt_format = """
-You are a helpful assistant for extracting entities for a GraphRAG task.
-"""
+# 你需要的实体类型（示例，可自行修改）
+ENTITY_TYPES = "person, organization, location, technology, role, event"
 
-usr_prompt_format = """
-[to be completed]
-"""
+# --------------------------------------------------------------------------- #
+def build_prompt(example, tokenizer):
+    """把 NQ 单条样本转成 chat-prompt 字符串"""
+    ctxs = example["ctxs"]
+    snippet_tpl = "# Title\n{title}\n\n## Text\n{text}"
+    # 拼接 passage 文本
+    passages = "\n\n".join(
+        snippet_tpl.format(title=c.get("title", "<title>"), text=c.get("text", "<text>"))
+        for c in ctxs
+    )
 
+    user_prompt = PROMPTS["entity_extraction"].format(
+        tuple_delimiter=TUPLE_DELIM,
+        record_delimiter=RECORD_DELIM,
+        input_text=passages,
+        entity_types=ENTITY_TYPES,
+        completion_delimiter=COMPLETION_TOKEN,
+    )
 
-NUM_DUPS = 5
+    messages = [
+        {"role": "system", "content": SYS_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
-def format_row(example, tokenizer):
-    prompts = []
-    ctxs = example.get('ctxs', [])
-    example_format = """\
-        # Title
-        {title}
+def parse_triples(raw_text, tuple_delimiter="|", completion_delimiter="<ENTITY EXTRACTED>"):
+    """将大模型生成的文本解析为结构化 triples 列表"""
+    triples = []
+    lines = raw_text.strip().split(tuple_delimiter[0])  # 快速切分
+    raw_text = raw_text.strip()
 
-        ## Text
-        {text}
-        """
+    if completion_delimiter in raw_text:
+        raw_text = raw_text.split(completion_delimiter)[0]
 
-    for i in range(min(NUM_DUPS, len(ctxs))):
-        try:
-            ctx = ctxs[i]
-            example_text = example_format.format(title=ctx.get('title', '<title>'), text=ctx.get('text', '<text>'))
-        except Exception as e:
-            print(f"[!] Error extracting context: {e}")
-            example_text = example_format.format(title="<title>", text="<text>")
+    triple_pattern = re.compile(r'\("(?P<type>entity|relationship)"\|(?P<fields>.*?)\)')
 
-        usr_prompt = usr_prompt_format.format(
-            question=example.get("question", "<question>"),
-            answers=example.get("answers", "<answers>"),
-            example=example_text
-        )
-        messages = [
-            {"role": "system", "content": sys_prompt_format.strip()},
-            {"role": "user", "content": usr_prompt.strip()}
-        ]
-        prompt_str = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        prompts.append(prompt_str)
-    return {'prompt': prompts}
+    for match in triple_pattern.finditer(raw_text):
+        ttype = match.group("type")
+        fields = match.group("fields").split(tuple_delimiter)
+
+        if ttype == "entity" and len(fields) == 3:
+            triples.append({
+                "type": "entity",
+                "name": fields[0].strip('" '),
+                "entity_type": fields[1].strip('" '),
+                "desc": fields[2].strip('" ')
+            })
+        elif ttype == "relationship" and len(fields) == 4:
+            triples.append({
+                "type": "relation",
+                "head": fields[0].strip('" '),
+                "tail": fields[1].strip('" '),
+                "desc": fields[2].strip('" '),
+                "score": int(fields[3]) if fields[3].isdigit() else 5
+            })
+
+    return triples
+
 
 def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--ds_name", default='nq-train', type=str)
-    parser.add_argument("--model_name", default='Qwen/Qwen2.5-7B-Instruct', type=str)
-    parser.add_argument("--world_size", default=2, type=int)
-    parser.add_argument("--max_new_tokens", default=512, type=int)
-    parser.add_argument("--dest_dir", required=True, type=str)
-    parser.add_argument("--num_proc", default=8, type=int)
-    parser.add_argument("--batch_size", default=2000, type=int, help="Batch size for processing")
-    return parser.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data_file", required=True, help="Path to nq.json")
+    ap.add_argument("--model_name", default="Qwen/Qwen2.5-7B-Instruct")
+    ap.add_argument("--world_size", type=int, default=2)
+    ap.add_argument("--max_new_tokens", type=int, default=2048)
+    ap.add_argument("--dest_dir", required=True)
+    ap.add_argument("--num_proc", type=int, default=8)
+    ap.add_argument("--batch_size", type=int, default=128)
+    return ap.parse_args()
 
-def call_model_dup(prompts, model, max_new_tokens=512, num_dups=1):
-    """优化的批处理函数"""
-    prompts = np.array(prompts).reshape((-1, num_dups))
-    
-    # 采样参数优化
-    sampling_params = SamplingParams(
-        temperature=0.7,  # 降低 temperature 加快生成
-        top_p=0.9,  # 稍微降低 top_p
-        max_tokens=max_new_tokens,
-    )
-    
-    # 一次性处理所有prompts
-    all_prompts = prompts.flatten().tolist()
-    print(f"[*] Generating {len(all_prompts)} outputs in one batch...")
-    
-    all_preds = model.generate(all_prompts, sampling_params)
-    
-    # 重新整理输出
-    outputs = [o.outputs[0].text for o in all_preds]
-    outputs_array = np.array(outputs).reshape((-1, num_dups))
-    
-    odf = pd.DataFrame(outputs_array, columns=[f'output_{i}' for i in range(num_dups)])
-    return odf
 
-def process_in_batches(ds, model, tokenizer, args):
-    """分批处理数据以避免内存问题"""
-    results = []
-    batch_size = args.batch_size
-    
-    total_batches = (len(ds) + batch_size - 1) // batch_size
-    
-    for i in tqdm(range(0, len(ds), batch_size), desc="Processing batches", total=total_batches):
-        batch = ds.select(range(i, min(i + batch_size, len(ds))))
-        
-        # 格式化批次数据
-        print(f"[*] Formatting batch {i//batch_size + 1}/{total_batches}...")
-        batch = batch.map(
-            lambda e: format_row(e, tokenizer), 
-            num_proc=args.num_proc,
-            remove_columns=batch.column_names,
-            desc="Formatting rows"
-        )
-        
-        # 生成预测
-        print(f"[*] Generating predictions for batch {i//batch_size + 1}/{total_batches}...")
-        preds = call_model_dup(batch['prompt'], model, args.max_new_tokens, NUM_DUPS)
-        results.append(preds)
-    
-    return pd.concat(results, ignore_index=True)
-
-if __name__ == '__main__':
+# --------------------------------------------------------------------------- #
+if __name__ == "__main__":
     args = parse_args()
-    
-    print("[+] Loading dataset...")
-    ds = load_dataset('json', data_files=args.ds_name, split='train')
-    print(f"[*] Dataset size: {len(ds)} examples")
-    
-    print("[+] Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    
-    print("[+] Loading model with optimized parameters...")
-    model = LLM(
-        model=args.model_name, 
+
+    print("[+] Loading dataset ...")
+    ds = load_dataset("json", data_files=args.data_file, split="train")
+    print(f"    Dataset size = {len(ds)}")
+
+    print("[+] Loading tokenizer ...")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
+
+    # 预生成 prompt 字符串
+    print("[+] Building prompts in parallel ...")
+    ds = ds.map(
+        lambda ex: {"prompt": build_prompt(ex, tokenizer)},
+        num_proc=args.num_proc,
+        desc="Generate prompt",
+    )
+
+    # --------------------------------------------------------------------- #
+    print("[+] Loading vLLM model ...")
+    llm = LLM(
+        model=args.model_name,
         tensor_parallel_size=args.world_size,
         trust_remote_code=True,
-        gpu_memory_utilization=0.9,  # 提高 GPU 内存使用率
-        max_num_batched_tokens=8192,  # 增加批处理的 token 数量
-        max_num_seqs=256,  # 增加并行处理的序列数
-        swap_space=4  # GB，如果需要可以使用 CPU 内存
+        gpu_memory_utilization=0.9,
+        max_num_batched_tokens=8192,
+        max_num_seqs=256,
     )
-    
-    print("[+] Processing and generating...")
-    # 分批处理以避免内存问题
-    preds = process_in_batches(ds, model, tokenizer, args)
-    
+    sampling = SamplingParams(
+        temperature=0.0,
+        top_p=1.0,
+        max_tokens=args.max_new_tokens,
+    )
+
+    # --------------------------------------------------------------------- #
     out_path = Path(args.dest_dir)
-    if out_path.is_dir():
-        out_path = out_path / "generated_outputs.csv"
-    
-    print(f"[+] Saving results to {out_path}...")
-    preds.to_csv(out_path, index=False)
-    print("[✓] Done.")
+    out_path.mkdir(parents=True, exist_ok=True)
+    jsonl_path = out_path / "generated_outputs.jsonl"
+
+    print("[+] Start generation ...")
+    with jsonl_path.open("w", encoding="utf-8") as fout:
+        for i in tqdm(range(0, len(ds), args.batch_size), desc="vLLM batch infer"):
+            batch = ds[i : i + args.batch_size]
+            prompts = batch["prompt"]
+            gens = model.generate(prompts, SamplingParams(max_tokens=args.max_new_tokens))
+
+            for ex, gen in zip(batch, gens):
+                output_text = gen.outputs[0].text
+                triples = parse_triples(output_text)
+
+                item = {
+                    "question": ex.get("question", None),
+                    "passages": ex.get("ctxs", []),  # title + text
+                    "triples": triples
+                }
+
+                fout.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+    print(f"[✓] Saved structured triples to {jsonl_path}")
