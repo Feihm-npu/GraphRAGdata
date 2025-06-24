@@ -96,7 +96,7 @@ if __name__ == "__main__":
     args = parse_args()
 
     print("[+] Loading dataset ...")
-    ds = load_dataset("json", data_files=args.data_file, split="train").select(range(100))
+    ds = load_dataset("json", data_files=args.data_file, split="train").select(range(2000))
     print(f"    Dataset size = {len(ds)}")
 
     print("[+] Loading tokenizer ...")
@@ -108,7 +108,8 @@ if __name__ == "__main__":
         lambda ex: {
             "prompt": build_prompt(ex, tokenizer),
             "question": ex["question"],
-            "ctxs": ex["ctxs"]
+            "ctxs": ex["ctxs"],
+            "answers": ex["answers"]
         },
         num_proc=args.num_proc,
         desc="Generate prompt",
@@ -146,6 +147,7 @@ if __name__ == "__main__":
             prompts    = batch["prompt"]     # list[str]
             questions  = batch["question"]   # list[str]
             ctxs_list  = batch["ctxs"] 
+            answers = batch["answers"]
 
             for question, ctxs, gen in zip(questions, ctxs_list, gens):
                 output_text = gen.outputs[0].text
