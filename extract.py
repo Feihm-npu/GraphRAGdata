@@ -8,6 +8,7 @@ from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 from prompts import PROMPTS
 import re
+import time
 # --- prompt 常量 ---
 SYS_PROMPT = (
     "You are a helpful assistant for extracting entities and relationships "
@@ -48,7 +49,6 @@ def build_prompt(example, tokenizer):
 def parse_triples(raw_text, tuple_delimiter="|", completion_delimiter="<ENTITY EXTRACTED>"):
     """将大模型生成的文本解析为结构化 triples 列表"""
     triples = []
-    lines = raw_text.strip().split(tuple_delimiter[0])  # 快速切分
     raw_text = raw_text.strip()
 
     if completion_delimiter in raw_text:
@@ -100,22 +100,27 @@ if __name__ == "__main__":
     print(f"    Dataset size = {len(ds)}")
 
     print("[+] Loading tokenizer ...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=False)
 
     # 预生成 prompt 字符串
     print("[+] Building prompts in parallel ...")
     ds = ds.map(
-        lambda ex: {"prompt": build_prompt(ex, tokenizer)},
+        lambda ex: {
+            "prompt": build_prompt(ex, tokenizer),
+            "question": ex["question"],
+            "ctxs": ex["ctxs"]
+        },
         num_proc=args.num_proc,
         desc="Generate prompt",
     )
+    print(ds)
 
     # --------------------------------------------------------------------- #
     print("[+] Loading vLLM model ...")
     llm = LLM(
         model=args.model_name,
         tensor_parallel_size=args.world_size,
-        trust_remote_code=True,
+        trust_remote_code=False,
         gpu_memory_utilization=0.9,
         max_num_batched_tokens=8192,
         max_num_seqs=256,
@@ -132,22 +137,26 @@ if __name__ == "__main__":
     jsonl_path = out_path / "generated_outputs.jsonl"
 
     print("[+] Start generation ...")
+    generation_start = time.time()
     with jsonl_path.open("w", encoding="utf-8") as fout:
         for i in tqdm(range(0, len(ds), args.batch_size), desc="vLLM batch infer"):
             batch = ds[i : i + args.batch_size]
             prompts = batch["prompt"]
             gens = llm.generate(prompts, SamplingParams(max_tokens=args.max_new_tokens))
+            prompts    = batch["prompt"]     # list[str]
+            questions  = batch["question"]   # list[str]
+            ctxs_list  = batch["ctxs"] 
 
-            for ex, gen in zip(batch, gens):
+            for question, ctxs, gen in zip(questions, ctxs_list, gens):
                 output_text = gen.outputs[0].text
                 triples = parse_triples(output_text)
 
                 item = {
-                    "question": ex.get("question", None),
-                    "passages": ex.get("ctxs", []),  # title + text
-                    "triples": triples
+                    "question": question,
+                    "passages": ctxs,
+                    "triples" : triples,
                 }
-
                 fout.write(json.dumps(item, ensure_ascii=False) + "\n")
-
+    generation_end = time.time()
+    print(f"[+] Generation completed and spent {generation_end-generation_start:.2f} seconds!")
     print(f"[✓] Saved structured triples to {jsonl_path}")

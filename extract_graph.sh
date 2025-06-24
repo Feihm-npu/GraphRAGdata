@@ -1,13 +1,13 @@
 set -e
 
-export CUDA_VISIBLE_DEVICES=0,1,4,5
+export CUDA_VISIBLE_DEVICES=0,2,4,5
 WORLD_SIZE=4
 export OMP_NUM_THREADS=64
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 
 
 
-EXTRACT_MODEL=Qwen/Qwen2.5-7B-Instruct
+EXTRACT_MODEL=/home/feihm/.cache/huggingface/hub/models--Qwen--Qwen2.5-7B-Instruct/snapshots/a09a35458c702b33eeacc393d103063234e8bc28
 
 DATASET_PATH=~/llm-fei/Data/NQ/contriever_nq_all_train/
 DS=train
