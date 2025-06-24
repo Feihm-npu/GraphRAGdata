@@ -96,7 +96,7 @@ if __name__ == "__main__":
     args = parse_args()
 
     print("[+] Loading dataset ...")
-    ds = load_dataset("json", data_files=args.data_file, split="train")
+    ds = load_dataset("json", data_files=args.data_file, split="train").select(range(100))
     print(f"    Dataset size = {len(ds)}")
 
     print("[+] Loading tokenizer ...")
@@ -136,7 +136,7 @@ if __name__ == "__main__":
         for i in tqdm(range(0, len(ds), args.batch_size), desc="vLLM batch infer"):
             batch = ds[i : i + args.batch_size]
             prompts = batch["prompt"]
-            gens = model.generate(prompts, SamplingParams(max_tokens=args.max_new_tokens))
+            gens = llm.generate(prompts, SamplingParams(max_tokens=args.max_new_tokens))
 
             for ex, gen in zip(batch, gens):
                 output_text = gen.outputs[0].text
