@@ -47,33 +47,43 @@ def build_prompt(example, tokenizer):
     return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
 def parse_triples(raw_text, tuple_delimiter="|", completion_delimiter="<ENTITY EXTRACTED>"):
-    """将大模型生成的文本解析为结构化 triples 列表"""
     triples = []
     raw_text = raw_text.strip()
 
     if completion_delimiter in raw_text:
         raw_text = raw_text.split(completion_delimiter)[0]
 
-    triple_pattern = re.compile(r'\("(?P<type>entity|relationship)"\|(?P<fields>.*?)\)')
+    # 允许字段加不加引号
+    pattern = re.compile(
+        r'\(\s*"(entity|relationship)"\s*' +
+        re.escape(tuple_delimiter) + r'\s*("?)([^"|]+)\2' +
+        re.escape(tuple_delimiter) + r'\s*("?)([^"|]+)\4' +
+        re.escape(tuple_delimiter) + r'\s*("?)([^"|]+)\6' +
+        r'(?:' + re.escape(tuple_delimiter) + r'\s*("?)([^"|)]+)\8)?\s*\)'
+    )
 
-    for match in triple_pattern.finditer(raw_text):
-        ttype = match.group("type")
-        fields = match.group("fields").split(tuple_delimiter)
+    for match in pattern.finditer(raw_text):
+        kind = match.group(1)
 
-        if ttype == "entity" and len(fields) == 3:
+        if kind == "entity":
             triples.append({
                 "type": "entity",
-                "name": fields[0].strip('" '),
-                "entity_type": fields[1].strip('" '),
-                "desc": fields[2].strip('" ')
+                "name": match.group(3).strip(),
+                "entity_type": match.group(5).strip(),
+                "desc": match.group(7).strip(),
             })
-        elif ttype == "relationship" and len(fields) == 4:
+        elif kind == "relationship":
+            score_str = match.group(9)
+            try:
+                score = int(score_str.strip())
+            except:
+                score = 5
             triples.append({
                 "type": "relation",
-                "head": fields[0].strip('" '),
-                "tail": fields[1].strip('" '),
-                "desc": fields[2].strip('" '),
-                "score": int(fields[3]) if fields[3].isdigit() else 5
+                "head": match.group(3).strip(),
+                "tail": match.group(5).strip(),
+                "desc": match.group(7).strip(),
+                "score": score,
             })
 
     return triples
@@ -96,7 +106,7 @@ if __name__ == "__main__":
     args = parse_args()
 
     print("[+] Loading dataset ...")
-    ds = load_dataset("json", data_files=args.data_file, split="train").select(range(2000))
+    ds = load_dataset("json", data_files=args.data_file, split="train").select(range(9600))
     print(f"    Dataset size = {len(ds)}")
 
     print("[+] Loading tokenizer ...")
@@ -135,7 +145,7 @@ if __name__ == "__main__":
     # --------------------------------------------------------------------- #
     out_path = Path(args.dest_dir)
     out_path.mkdir(parents=True, exist_ok=True)
-    jsonl_path = out_path / "generated_outputs.jsonl"
+    jsonl_path = out_path / "generated_outputs_0_9600.jsonl"
 
     print("[+] Start generation ...")
     generation_start = time.time()
@@ -149,16 +159,20 @@ if __name__ == "__main__":
             ctxs_list  = batch["ctxs"] 
             answers = batch["answers"]
 
-            for question, ctxs, gen in zip(questions, ctxs_list, gens):
+            for question, ctxs, gen, answer in zip(questions, ctxs_list, gens, answers):
                 output_text = gen.outputs[0].text
+                # print(f'output: {output_text}')
+
                 triples = parse_triples(output_text)
 
                 item = {
                     "question": question,
                     "passages": ctxs,
                     "triples" : triples,
+                    "answers": answer,
                 }
                 fout.write(json.dumps(item, ensure_ascii=False) + "\n")
+            
     generation_end = time.time()
     print(f"[+] Generation completed and spent {generation_end-generation_start:.2f} seconds!")
     print(f"[✓] Saved structured triples to {jsonl_path}")

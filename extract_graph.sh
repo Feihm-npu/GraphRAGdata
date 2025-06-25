@@ -1,6 +1,6 @@
 set -e
 
-export CUDA_VISIBLE_DEVICES=0,2,4,5
+export CUDA_VISIBLE_DEVICES=1,4,5,6
 WORLD_SIZE=4
 export OMP_NUM_THREADS=64
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False

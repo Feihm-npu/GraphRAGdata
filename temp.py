@@ -8,19 +8,24 @@ graph_ds = load_dataset('json', data_files='/home/feihm/llm-fei/GraphRAGdata/gra
 print(f'len(origin_ds):{len(origin_ds)}')
 print(f'len(graph_ds):{len(graph_ds)}')
 
-assert len(origin_ds) == len(graph_ds), "mismatched size"
+print(origin_ds[10]["question"])
+print(graph_ds[10]["question"])
+print(graph_ds[10]["triples"])
+print("*"*20)
+print(graph_ds[10]["passages"])
+# assert len(origin_ds) == len(graph_ds), "mismatched size"
 
-# 合并函数
-def combined(example1, example2):
-    example1 = dict(example1)  # 复制为普通 dict
-    example1["triples"] = example2.get("triples", None)
-    example1["passages"] = example2.get("passages", None)
-    return example1
+# # 合并函数
+# def combined(example1, example2):
+#     example1 = dict(example1)  # 复制为普通 dict
+#     example1["triples"] = example2.get("triples", None)
+#     example1["passages"] = example2.get("passages", None)
+#     return example1
 
-# 合并两个 dataset
-combined_data = [combined(e1, e2) for e1, e2 in zip(origin_ds, graph_ds)]
+# # 合并两个 dataset
+# combined_data = [combined(e1, e2) for e1, e2 in zip(origin_ds, graph_ds)]
 
-# 保存为 json 文件
-with open("combined_output.json", "w", encoding="utf-8") as f:
-    for item in combined_data:
-        f.write(json.dumps(item, ensure_ascii=False) + "\n")
+# # 保存为 json 文件
+# with open("combined_output.json", "w", encoding="utf-8") as f:
+#     for item in combined_data:
+        # f.write(json.dumps(item, ensure_ascii=False) + "\n")
